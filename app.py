@@ -1,85 +1,63 @@
 import streamlit as st
-import pandas as pd
-import pdfplumber
-from docx import Document
-from PyPDF2 import PdfReader
-import json
-from openai import OpenAI
+import time
+from openai import OpenAI, AuthenticationError, RateLimitError, APIError
 
-# ---- PAGE SETUP ----
-st.set_page_config(page_title="Resume Checker", page_icon="📄")
-st.title("📄 Resume Checker using OpenAI")
+# --- App Title ---
+st.title("🧠 Smart Resume Checker")
+st.write("Upload your resume text and get instant feedback powered by GPT!")
 
-# ---- API KEY INPUT ----
-api_key = st.text_input("🔑 Enter your OpenAI API Key", type="password")
-if not api_key:
-    st.info("Please enter your OpenAI API key to continue.")
+# --- Securely load API key ---
+# Make sure your Streamlit Secrets contain:
+# OPENAI_API_KEY = "sk-your-api-key"
+try:
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+except KeyError:
+    st.error("❌ API key not found! Please add OPENAI_API_KEY to your Streamlit secrets.")
     st.stop()
 
-client = OpenAI(api_key=api_key)
+# --- User Input ---
+resume_text = st.text_area("📄 Paste your resume text here:", height=200)
 
-# ---- FILE UPLOADS ----
-st.subheader("Upload Files")
-jd_file = st.file_uploader("📄 Upload Job Description (PDF only)", type=["pdf"])
-resume_file = st.file_uploader("👤 Upload Resume (PDF or DOCX)", type=["pdf", "docx"])
-
-# ---- PROCESS FILES ----
-def extract_text_from_pdf(uploaded_file):
-    text = ""
-    with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            content = page.extract_text()
-            if content:
-                text += content + "\n"
-    return text
-
-def extract_text_from_docx(uploaded_file):
-    doc = Document(uploaded_file)
-    return "\n".join(p.text for p in doc.paragraphs)
-
-# ---- ANALYZE ----
-if jd_file and resume_file:
-    job_description_text = extract_text_from_pdf(jd_file)
-    resume_text = ""
-    if resume_file.name.endswith(".pdf"):
-        resume_text = extract_text_from_pdf(resume_file)
-    else:
-        resume_text = extract_text_from_docx(resume_file)
-
-    st.success("✅ Files uploaded successfully!")
-
-    if st.button("🔍 Analyze Resume"):
-        with st.spinner("Analyzing with OpenAI..."):
-            prompt = f"""
-            You are a professional HR assistant.
-            Job Description:
-            {job_description_text}
-
-            Resume:
-            {resume_text}
-
-            Tasks:
-            1. Score the resume out of 10 based on job fit.
-            2. Extract applicant details: Name, Email, Phone, Skills, Education, Experience.
-            3. Provide a short feedback (2-3 lines).
-            Return only valid JSON, no explanations.
-            """
-
+# --- Define a safe GPT call with retry logic ---
+def get_resume_feedback(prompt, retries=5):
+    for attempt in range(retries):
+        try:
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"}
+                model="gpt-4o-mini",  # You can change to gpt-3.5-turbo for lower cost
+                messages=[
+                    {"role": "system", "content": "You are a professional HR resume evaluator."},
+                    {"role": "user", "content": prompt}
+                ],
             )
+            return response.choices[0].message.content
 
-            result_text = response.choices[0].message.content
-            result_json = json.loads(result_text)
+        except RateLimitError:
+            wait = 2 ** attempt
+            st.warning(f"⚠️ Rate limit hit. Retrying in {wait} seconds...")
+            time.sleep(wait)
 
-            st.subheader("📊 Resume Evaluation Result")
-            st.json(result_json)
+        except AuthenticationError:
+            st.error("❌ Authentication failed. Check your OpenAI API key.")
+            st.stop()
 
-            # ---- SAVE TO EXCEL ----
-            df = pd.DataFrame([result_json])
-            df.to_excel("resume_analysis.xlsx", index=False)
+        except APIError as e:
+            st.error(f"⚠️ API error: {e}. Retrying...")
+            time.sleep(2)
 
-            with open("resume_analysis.xlsx", "rb") as f:
-                st.download_button("⬇️ Download Excel Results", f, file_name="resume_analysis.xlsx")
+    st.error("❌ Failed after multiple retries due to rate limits or API issues.")
+    return None
+
+# --- When user clicks the button ---
+if st.button("🔍 Analyze Resume"):
+    if not resume_text.strip():
+        st.warning("Please paste your resume text first.")
+    else:
+        with st.spinner("Analyzing your resume..."):
+            prompt = f"Please evaluate the following resume and give suggestions for improvement:\n\n{resume_text}"
+            feedback = get_resume_feedback(prompt)
+
+            if feedback:
+                st.success("✅ Analysis Complete!")
+                st.subheader("🧩 Feedback:")
+                st.write(feedback)
+
